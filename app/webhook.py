@@ -86,6 +86,7 @@ async def receive_event(
         email=str(event.get("email") or ""),
         user_id=str(event.get("user_id") or ""),
         text=str(event.get("text") or ""),
+        channel=str(event.get("channel") or ""),
         settings=settings,
         registry=_registry(),
         store=store,

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app.bi_api import reset_rate_limit
 from app.config import reset_settings
 from app.main import app
+from app.outbox import OUTBOX, POSTER
 from app.security import build_signature
 from app.store import STORE
 from app.training import BUFFER
@@ -16,6 +17,8 @@ from app.training import BUFFER
 def clean_state() -> None:
     STORE.reset()
     BUFFER.reset()
+    OUTBOX.reset()
+    POSTER.sent.clear()
     reset_rate_limit()
     reset_settings()
     yield

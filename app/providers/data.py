@@ -122,3 +122,12 @@ WORK_ITEMS = (
     {"id": "TASK-118", "title": "Review lookalike-summer CPA", "assignee": "Reese Operator", "status": "open"},
     {"id": "TASK-121", "title": "Publish fall pack landing page", "assignee": "Avery Viewer", "status": "done"},
 )
+
+# Last successful sync per source, as the sync jobs would record it.
+SOURCE_SYNCS = {
+    "commerce": "2026-09-01T05:40:00+00:00",
+    "ads": "2026-09-01T04:10:00+00:00",
+    "web_analytics": "2026-08-31T23:55:00+00:00",
+    "inventory": "2026-08-29T06:00:00+00:00",
+    "support": "2026-09-01T06:05:00+00:00",
+}

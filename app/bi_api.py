@@ -15,6 +15,7 @@ from fastapi import APIRouter, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.analytics.engine import run_query
+from app.analytics.schema_gate import check_schema
 from app.analytics.warehouse import Warehouse
 from app.config import get_settings
 
@@ -53,6 +54,12 @@ async def bi_query(
 ) -> dict[str, Any]:
     _authorize(authorization)
     _rate_limit(authorization or "")
+    schema = check_schema(WAREHOUSE)
+    if not schema.ok:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "schema_drift", "missing": schema.missing},
+        )
     result = run_query(
         WAREHOUSE,
         metrics=body.metrics,

@@ -10,6 +10,8 @@ from app.config import Settings
 from app.evidence import evidence_gap_response, evidence_issues
 from app.identity import IdentityError, resolve_access
 from app.llm.service import create_assistant_reply
+from app.outbox import OUTBOX, POSTER, AnswerOutbox, ChatPoster
+from app.playbook import coverage_note, plan_for
 from app.providers.registry import ProviderRegistry
 from app.redaction import redact_text
 from app.routing import Intent, route_intent
@@ -38,6 +40,9 @@ async def answer_event(
     settings: Settings,
     registry: ProviderRegistry,
     store: EventStore,
+    channel: str = "",
+    outbox: AnswerOutbox = OUTBOX,
+    poster: ChatPoster = POSTER,
 ) -> dict[str, Any]:
     try:
         access = resolve_access(email=email, user_id=user_id, settings=settings)
@@ -52,6 +57,8 @@ async def answer_event(
         return {"ok": False, "error": str(exc), "incident_id": getattr(incident, "incident_id", "")}
 
     intent = route_intent(text)
+    plan = plan_for(text, access)
+    instructions = INSTRUCTIONS + ("\n\n" + plan.instructions() if plan else "")
     tools = registry.allowed_tools(access)
     guard = ToolCallGuard()
 
@@ -70,7 +77,7 @@ async def answer_event(
             settings,
             question=text,
             intent=intent,
-            instructions=INSTRUCTIONS,
+            instructions=instructions,
             tools=tools,
             execute=execute,
             on_provider_switch=on_switch,
@@ -87,9 +94,12 @@ async def answer_event(
 
     issues = evidence_issues(reply.text, successful_tools=reply.successful_tools)
     answer = evidence_gap_response(issues) if issues else reply.text
+    note = coverage_note(plan, reply.successful_tools) if plan else ""
+    if note:
+        answer = f"{answer}\n\n{note}"
     safe_answer = redact_text(answer)
 
-    store.complete(
+    trace = store.complete(
         event_id=event_id,
         claim_token=claim_token,
         user_id=access.user_id,
@@ -98,6 +108,12 @@ async def answer_event(
         sources_used=sorted(reply.successful_tools),
         provider=reply.provider,
     )
+    if trace is None:
+        # Another worker owns this event now (our lease expired). Its answer wins.
+        return {"ok": False, "error": "claim_lost"}
+    # Persist before posting: a chat outage must not lose a finished answer.
+    outbox.enqueue(request_id=trace.request_id, channel=channel or user_id, text=safe_answer)
+    outbox.deliver_pending(poster)
     capture_example(
         event_id=event_id,
         question=text,
@@ -111,6 +127,7 @@ async def answer_event(
         "provider": reply.provider,
         "intent": intent.value,
         "fallback_used": reply.fallback_used,
+        "playbook": bool(plan),
         "permissions": sorted(perm.value for perm in access.effective_permissions),
     }
 

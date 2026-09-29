@@ -8,6 +8,9 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.access import Role
 from app.identity import DEMO_USERS
+from app.bi_api import WAREHOUSE
+from app.housekeeping import run_housekeeping
+from app.outbox import OUTBOX, POSTER
 from app.store import STORE
 from app.training import BUFFER
 
@@ -72,3 +75,11 @@ async def list_training(email: str) -> dict[str, Any]:
             for item in BUFFER.all()
         ]
     }
+
+
+@router.post("/housekeeping")
+async def housekeeping(email: str) -> dict[str, Any]:
+    """Manual trigger for the daily job. A scheduler calls the same function."""
+    _require_admin(email)
+    report = run_housekeeping(store=STORE, outbox=OUTBOX, poster=POSTER, warehouse=WAREHOUSE)
+    return {"digest": report.digest(), "schema_ok": report.schema_ok}
