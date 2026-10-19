@@ -16,6 +16,7 @@ import httpx
 
 from app.http_retry import backoff_delay, is_retryable_status
 from app.llm.types import LLMError
+from app.llm.usage import record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ async def post_json(
                     raise LLMError(f"{provider} returned invalid JSON") from exc
                 if not isinstance(payload, dict):
                     raise LLMError(f"{provider} returned an invalid response")
+                record_usage(provider, request_body, payload)
                 return payload
 
             detail = f"{provider} request failed (HTTP {response.status_code})"

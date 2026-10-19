@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from app.analytics.snapshots import SnapshotLayer
 from app.providers.data import COHORTS, DAILY_COMMERCE, INVENTORY, WEB_DAILY
 
 
@@ -21,6 +22,12 @@ class Warehouse:
     cohorts: list[dict[str, object]] = field(default_factory=lambda: list(COHORTS))
     web_daily: list[dict[str, object]] = field(default_factory=lambda: list(WEB_DAILY))
     inventory: list[dict[str, object]] = field(default_factory=lambda: list(INVENTORY))
+    # Readers use this, never daily_commerce directly (see snapshots.py).
+    snapshot: SnapshotLayer = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.snapshot = SnapshotLayer(facts=lambda: self.daily_commerce)
+        self.snapshot.rebuild()
 
     def freshness_days(self) -> int:
         if not self.daily_commerce:

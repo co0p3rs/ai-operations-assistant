@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from app.config import Settings
+from app.llm.claude import run_claude
 from app.llm.demo import run_demo_model
 from app.llm.transport import post_json
 from app.llm.types import AssistantReply, LLMError, ToolBudgetExceededError
@@ -19,7 +20,6 @@ logger = logging.getLogger(__name__)
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 SwitchHandler = Callable[[str, str], Awaitable[None]]
 
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 OPENAI_URL = "https://api.openai.com/v1/responses"
 
 
@@ -99,25 +99,16 @@ async def _run_provider(
     transport: httpx.AsyncBaseTransport | None,
 ) -> AssistantReply:
     if provider == "anthropic":
-        payload = await post_json(
-            url=ANTHROPIC_URL,
-            headers={
-                "x-api-key": settings.anthropic_api_key.get_secret_value(),
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            request_body={
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 800,
-                "system": instructions,
-                "messages": [{"role": "user", "content": question}],
-                "tools": _anthropic_tools(tools),
-            },
+        return await run_claude(
+            api_key=settings.anthropic_api_key.get_secret_value(),
+            model=settings.anthropic_model,
+            question=question,
+            instructions=instructions,
+            tools=tools,
+            execute=execute,
             timeout=settings.llm_timeout_seconds,
             transport=transport,
-            provider="anthropic",
         )
-        return _from_anthropic(payload)
     if provider == "openai":
         payload = await post_json(
             url=OPENAI_URL,
@@ -126,7 +117,7 @@ async def _run_provider(
                 "content-type": "application/json",
             },
             request_body={
-                "model": "gpt-4.1-mini",
+                "model": settings.openai_model,
                 "instructions": instructions,
                 "input": question,
                 "tools": tools,
@@ -137,29 +128,6 @@ async def _run_provider(
         )
         return _from_openai(payload)
     raise LLMError(f"unknown provider {provider}")
-
-
-def _anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    converted = []
-    for tool in tools:
-        converted.append(
-            {
-                "name": tool["name"],
-                "description": tool.get("description", ""),
-                "input_schema": tool.get("parameters", {"type": "object"}),
-            }
-        )
-    return converted
-
-
-def _from_anthropic(payload: dict[str, Any]) -> AssistantReply:
-    parts = payload.get("content") or []
-    texts = [
-        str(part.get("text", ""))
-        for part in parts
-        if isinstance(part, dict) and part.get("type") == "text"
-    ]
-    return AssistantReply(text="".join(texts) or "No model text.", provider="anthropic")
 
 
 def _from_openai(payload: dict[str, Any]) -> AssistantReply:

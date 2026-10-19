@@ -36,11 +36,8 @@ def run_query(
     except ContractValidationError as exc:
         return {"ok": False, "error": "contract_violation", "detail": str(exc)}
 
-    commerce_rows = [
-        row
-        for row in warehouse.daily_commerce
-        if start.isoformat() <= str(row["day"]) <= end.isoformat()
-    ]
+    # Commerce reads the shared daily snapshot, never the raw facts.
+    commerce_rows = warehouse.snapshot.rows_between(start, end)
     web_rows = [
         row
         for row in warehouse.web_daily
