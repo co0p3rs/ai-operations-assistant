@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     llm_primary: str = "anthropic"
     llm_fallback: str = "openai"
     llm_timeout_seconds: float = 30.0
+    anthropic_model: str = "claude-sonnet-4-20250514"
+    openai_model: str = "gpt-4.1-mini"
 
     bi_api_token: SecretStr = SecretStr("local-bi-token")
     bi_rate_limit_per_minute: int = 60

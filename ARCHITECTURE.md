@@ -27,11 +27,12 @@ POST /webhooks/events
 Background turn
     │  company-domain identity
     │  deny-by-default RBAC
-    │  keyword intent router
-    │  permission-scoped tool list
+    │  every permitted tool (RBAC-scoped, never router-scoped)
+    │  keyword intent → one line of advice in the prompt
     ▼
-Model (demo, or Claude then OpenAI)
-    │  tool loop + date-slice guard
+Model (demo, or Claude then OpenAI)                  ◀── usage meter (per turn)
+    │  tool loop: cached tools + system + moving history breakpoint
+    │  max_tokens with thinking headroom, date-slice guard
     │  evidence check (fail-closed)
     │  playbook coverage note
     │  credential redaction
@@ -45,6 +46,29 @@ Answer outbox ──► chat platform (idempotency key = request_id)
 The webhook does not answer. A slow model must not hold the chat
 platform's retry budget. `request_id` is the claim's id, so logs, traces,
 and incidents join without a second identifier.
+
+## Data path
+
+```text
+Upstream report APIs
+    │  one unpaged request per date chunk (halved until it fits a page)
+    │  rows must sum to the source's own total, or nothing is written
+    │  the pulled date window is replaced, never merged
+    ▼
+Facts (order / line-item level)
+    │  incremental refresh: trailing window, every few minutes
+    │  full rebuild: nightly, reports days that drifted
+    ▼
+Daily snapshot  ── generation +1 only when a row changed
+    ├──▶ assistant tools (analytics_query)
+    └──▶ /bi/query ◀── response cache keyed by generation
+                        single builder per shape
+                        last good answer served while rebuilding
+                        warmed after each sync
+```
+
+Both readers sum the same snapshot rows, so the chat answer and the
+dashboard cannot disagree about last month's revenue.
 
 ## Why these boundaries exist
 
@@ -108,6 +132,78 @@ orchestrator refuses to fall over in that case. When a real fallback
 does happen, tool counters reset so the second model is not blocked by
 the first attempt.
 
+**The router advises; it does not gate.** The first design let the
+keyword router (and later a small classifier) decide which tools the
+answer model received. Every misclassification then became a wrong or
+"I can't access that" answer, and it was the most frequent complaint in
+production. Adding keywords moved the failures around instead of removing
+them. Now the model always gets every tool the caller is permitted to use,
+and the routed intent travels as one line of advice. Permission is still
+enforced by the registry on every call, so widening the *choice* did not
+widen *access*.
+
+**Cost is measured where it happens.** All model HTTP goes through one
+transport function, so that is where usage is read into a per-turn meter
+(a context variable, so no caller changes). The trace keeps tokens by
+model, cache reads and writes, and an estimated price. A daily console
+total cannot tell a heavy answer from a test run; a per-request number can,
+and it is what exposed the next two problems.
+
+**Cached tool rounds.** A tool loop resends the entire conversation each
+round: system prompt, every tool definition, every tool result so far.
+Round six pays for rounds one to five again. Anthropic allows four cache
+breakpoints; the loop uses three: the last tool definition, the system
+block, and the newest message, re-placed on every round so the next round
+reads everything before it at a tenth of the price. The model sees the
+same messages. Measured on a five-round answer: ~85% of input from cache,
+roughly a third of the uncached price.
+
+**Thinking needs headroom.** Models that reason before answering count the
+reasoning against `max_tokens`. With a tight answer budget, a multi-source
+question used the whole budget thinking and returned no text. The
+orchestrator saw a provider failure and redid the entire answer on the
+fallback model: billed twice, twice the latency, and the weaker model wrote
+the answer. `max_tokens` is now four times the answer budget. Unused
+headroom costs nothing; the instructions, not the cap, set answer length.
+A no-text response is still raised as an error so it stays visible.
+
+**Snapshots, not request-time aggregation.** Dashboards first aggregated
+order-level facts on every open, and the assistant did the same thing in
+its own code. A year-long view scanned a year of orders, and the two paths
+could round or filter differently. One daily snapshot now feeds both.
+Refunds and cancellations settle late, so an incremental job rewrites a
+trailing window often, and a nightly full rebuild recomputes everything and
+reports which days drifted outside that window. Drift is a signal: the
+window is too short, or an upstream rewrote history. Ratios such as AOV are
+computed from stored sums at read time, never stored, so there is no
+average of averages.
+
+**A cache keyed by data, not by the clock.** A TTL is wrong both ways:
+too short rebuilds unchanged answers, too long shows yesterday after a sync.
+Response keys carry the generation of every source they read, and a sync
+bumps a generation only when rows changed. Two further problems came with
+the first busy morning. A sync made every open dashboard miss at once and
+start the same heavy build, so one builder per key now holds a lock while
+the rest wait for its result. Whoever arrived during that build still
+waited for it, so the last good answer per shape is kept and served at once,
+marked stale, while the build runs; a warmer rebuilds the common shapes
+right after each sync so real viewers rarely meet a cold key.
+
+**Pulling from paged APIs.** Two upstream report APIs paged grouped rows in
+metric order. Many rows tie on that metric, and without a unique tiebreaker
+the order of ties differs between requests, so consecutive pages overlapped:
+some rows arrived twice and others never. Nothing errored; the duplicates
+collapsed on the primary key and the warehouse held a slightly smaller
+number than the source. Separately, a page cap had stopped one pull at
+20,000 of ~25,800 rows. The sync now never pages: it requests date chunks
+small enough for a single page and halves any chunk whose reported total
+exceeds what came back. The pulled rows must add up to the source's own
+total for the window, or the pull is refused before anything is written.
+Storage replaces the pulled window instead of merging into it, so a row the
+upstream re-keyed or removed cannot survive beside its replacement. The bug
+is reproduced in `tests/test_chunked_sync.py` against a fake API with
+unstable tie ordering.
+
 **Evidence is fail-closed.** If the answer says it checked Commerce
 and no `commerce_*` tool succeeded, the answer is replaced. The model
 does not get a second chance to invent a citation.
@@ -156,6 +252,10 @@ The same shapes map onto a multi-process deployment:
 | `AnswerOutbox` dict | Outbox table written in the same transaction as the trace |
 | `/admin/housekeeping` | Scheduled timer (cron / systemd) calling the same function |
 | In-process warehouse | Local mirror of the commerce API, incremental sync, nightly reconcile |
+| `SnapshotLayer` rows | Materialized snapshot table, refreshed by a timer (window every 15 min, full nightly) |
+| `DashboardCache` dict + `asyncio.Lock` | Redis: `INCR` generation per source, versioned keys with TTL, `SET NX` build lock, "latest" key |
+| `fetch_unpaged` against a fake API | The same function over `httpx`, one request per chunk, reconcile before the write transaction |
+| Usage on the trace | A JSON column on the request row, shown next to latency in the admin |
 | Demo model | Claude primary, OpenAI fallback, shared `llm/transport.py` |
 | Seeded `DEMO_USERS` | Directory sync + stored grants |
 

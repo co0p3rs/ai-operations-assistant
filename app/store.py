@@ -60,6 +60,8 @@ class RequestTrace:
     sources_used: list[str] = field(default_factory=list)
     provider: str = ""
     error: str = ""
+    # Tokens and estimated cost of every model call in the turn (llm/usage.py).
+    usage: dict[str, Any] | None = None
     created_at: float = field(default_factory=time.time)
     completed_at: float | None = None
 
@@ -184,6 +186,7 @@ class EventStore:
         answer: str,
         sources_used: list[str],
         provider: str,
+        usage: dict[str, Any] | None = None,
     ) -> RequestTrace | None:
         with self._lock:
             if not self._owns(event_id, claim_token):
@@ -205,6 +208,7 @@ class EventStore:
                 answer=answer,
                 sources_used=sources_used,
                 provider=provider,
+                usage=usage,
                 completed_at=time.time(),
             )
             self._traces[claimed.request_id] = trace

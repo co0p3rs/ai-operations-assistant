@@ -9,10 +9,12 @@ sources are late *before* someone quotes a stale number in a meeting.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
 from app.analytics.schema_gate import check_schema
+from app.analytics.snapshots import RefreshResult
 from app.analytics.warehouse import Warehouse
 from app.outbox import AnswerOutbox, ChatPoster
 from app.providers.data import SOURCE_SYNCS
@@ -48,6 +50,8 @@ class HousekeepingReport:
     answers_redelivered: int
     schema_ok: bool
     sources: tuple[SourceHealth, ...]
+    # Days the nightly full snapshot rebuild found out of date (see snapshots.py).
+    snapshot_drift_days: tuple[str, ...] = ()
 
     def digest(self) -> str:
         stale = [s for s in self.sources if s.stale]
@@ -57,6 +61,11 @@ class HousekeepingReport:
             lines.append(f"- {item.source}: {lag} (SLA {item.sla_hours:g}h)")
         if not self.schema_ok:
             lines.append("- warehouse schema drift: analytics queries are refusing to answer")
+        if self.snapshot_drift_days:
+            lines.append(
+                f"- snapshot drift on {len(self.snapshot_drift_days)} day(s) outside the "
+                f"incremental window (first {self.snapshot_drift_days[0]}): history was rewritten upstream"
+            )
         lines.append(
             f"Maintenance: pruned {self.traces_pruned} traces, closed {self.incidents_closed} "
             f"stale incidents, recovered {self.turns_recovered} turns "
@@ -85,8 +94,10 @@ def run_housekeeping(
     warehouse: Warehouse,
     syncs: dict[str, str] = SOURCE_SYNCS,
     now: float | None = None,
+    rebuild_snapshot: Callable[[], RefreshResult] | None = None,
 ) -> HousekeepingReport:
     moment = time.time() if now is None else now
+    rebuild = rebuild_snapshot() if rebuild_snapshot is not None else None
     recoveries = store.recover_expired(now=moment)
     delivery = outbox.deliver_pending(poster, now=moment)
     return HousekeepingReport(
@@ -97,4 +108,5 @@ def run_housekeeping(
         answers_redelivered=delivery.delivered,
         schema_ok=check_schema(warehouse).ok,
         sources=source_health(syncs, now=moment),
+        snapshot_drift_days=rebuild.drift_days if rebuild else (),
     )

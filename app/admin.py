@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.access import Role
 from app.identity import DEMO_USERS
-from app.bi_api import WAREHOUSE
+from app.bi_api import WAREHOUSE, sync_snapshot
 from app.housekeeping import run_housekeeping
 from app.outbox import OUTBOX, POSTER
 from app.store import STORE
@@ -37,6 +37,7 @@ async def list_traces(email: str) -> dict[str, Any]:
             "sources_used": item.sources_used,
             "provider": item.provider,
             "error": item.error,
+            "usage": item.usage,
         }
         for item in STORE.traces()
     ]
@@ -81,5 +82,11 @@ async def list_training(email: str) -> dict[str, Any]:
 async def housekeeping(email: str) -> dict[str, Any]:
     """Manual trigger for the daily job. A scheduler calls the same function."""
     _require_admin(email)
-    report = run_housekeeping(store=STORE, outbox=OUTBOX, poster=POSTER, warehouse=WAREHOUSE)
+    report = run_housekeeping(
+        store=STORE,
+        outbox=OUTBOX,
+        poster=POSTER,
+        warehouse=WAREHOUSE,
+        rebuild_snapshot=lambda: sync_snapshot(full=True),
+    )
     return {"digest": report.digest(), "schema_ok": report.schema_ok}

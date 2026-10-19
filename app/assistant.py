@@ -10,11 +10,12 @@ from app.config import Settings
 from app.evidence import evidence_gap_response, evidence_issues
 from app.identity import IdentityError, resolve_access
 from app.llm.service import create_assistant_reply
+from app.llm.usage import start_usage_meter
 from app.outbox import OUTBOX, POSTER, AnswerOutbox, ChatPoster
 from app.playbook import coverage_note, plan_for
 from app.providers.registry import ProviderRegistry
 from app.redaction import redact_text
-from app.routing import Intent, route_intent
+from app.routing import Intent, advice_for, route_intent
 from app.store import EventStore
 from app.tool_guard import ToolCallGuard
 from app.training import capture_example
@@ -56,9 +57,16 @@ async def answer_event(
         )
         return {"ok": False, "error": str(exc), "incident_id": getattr(incident, "incident_id", "")}
 
+    meter = start_usage_meter()
     intent = route_intent(text)
     plan = plan_for(text, access)
-    instructions = INSTRUCTIONS + ("\n\n" + plan.instructions() if plan else "")
+    advice = advice_for(intent)
+    instructions = (
+        INSTRUCTIONS
+        + ("\n\n" + advice if advice else "")
+        + ("\n\n" + plan.instructions() if plan else "")
+    )
+    # Every permitted tool, every turn: the router advises, the model chooses.
     tools = registry.allowed_tools(access)
     guard = ToolCallGuard()
 
@@ -107,6 +115,7 @@ async def answer_event(
         answer=safe_answer,
         sources_used=sorted(reply.successful_tools),
         provider=reply.provider,
+        usage=None if meter.empty else meter.summary(),
     )
     if trace is None:
         # Another worker owns this event now (our lease expired). Its answer wins.
